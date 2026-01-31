@@ -3,7 +3,7 @@ Gesture Recognizer
 손 제스처 인식 알고리즘
 """
 import numpy as np
-from typing import Optional
+from typing import Optional, List
 import time
 
 
@@ -31,12 +31,12 @@ class GestureRecognizer:
     
     def __init__(
         self,
-        pinch_threshold: float = 0.05,  # 정규화된 거리 (0~1)
-        pinch_hold_time: float = 0.1,   # 핀치 유지 시간 (초)
-        fist_threshold: float = 0.08,   # 주먹 임계값
-        fist_hold_time: float = 0.5,    # 주먹 유지 시간 (초)
-        dwell_time: float = 1.0,        # 체류 시간 (초)
-        dwell_radius: float = 0.03,     # 체류 반경
+        pinch_threshold: float = 0.05,
+        pinch_hold_time: float = 0.1,
+        fist_threshold: float = 0.08,
+        fist_hold_time: float = 0.5,
+        dwell_time: float = 0.8,        # 체류 시간 약간 단축
+        dwell_radius: float = 0.03,
     ):
         self.pinch_threshold = pinch_threshold
         self.pinch_hold_time = pinch_hold_time
@@ -45,15 +45,34 @@ class GestureRecognizer:
         self.dwell_time = dwell_time
         self.dwell_radius = dwell_radius
         
-        # 상태 추적
-        self.pinch_start_time: Optional[float] = None
-        self.fist_start_time: Optional[float] = None
-        self.dwell_start_time: Optional[float] = None
-        self.dwell_position: Optional[tuple] = None
-        
-        # 이전 상태
-        self.was_pinching = False
-        self.was_fist = False
+        # 양손 독립적 상태 추적
+        self.states = {
+            'Left': self._init_hand_state(),
+            'Right': self._init_hand_state()
+        }
+    
+    def _init_hand_state(self) -> dict:
+        """손 하나에 대한 상태 초기화"""
+        return {
+            'fingers': {
+                'thumb': self._init_finger_state(),
+                'index': self._init_finger_state(),
+                'middle': self._init_finger_state(),
+                'ring': self._init_finger_state(),
+                'pinky': self._init_finger_state(),
+            },
+            'fist_start_time': None,
+            'was_fist': False
+        }
+    
+    def _init_finger_state(self) -> dict:
+        """손가락 하나에 대한 상태 초기화"""
+        return {
+            'dwell_start_time': None,
+            'dwell_position': None,
+            'pinch_start_time': None,
+            'was_pinching': False
+        }
     
     def _calculate_distance(self, p1: np.ndarray, p2: np.ndarray) -> float:
         """두 점 사이의 유클리드 거리 계산"""
@@ -65,68 +84,47 @@ class GestureRecognizer:
         mcp = landmarks[mcp_idx]
         wrist = landmarks[self.WRIST]
         
-        # 손가락 끝이 MCP보다 손목에 가까우면 접힌 것으로 판단
         tip_to_wrist = self._calculate_distance(tip, wrist)
         mcp_to_wrist = self._calculate_distance(mcp, wrist)
         
         return tip_to_wrist < mcp_to_wrist * 1.1
     
-    def detect_pinch(self, landmarks: np.ndarray) -> dict:
-        """
-        핀치 제스처 감지
-        
-        Args:
-            landmarks: shape (21, 3) 손 랜드마크 배열
+    def detect_pinch(self, landmarks: np.ndarray, label: str, finger_name: str, tip_idx: int) -> dict:
+        """핀치 제스처 감지 (엄지 vs 특정 손가락)"""
+        if finger_name == 'thumb':
+            return {'is_pinching': False, 'pinch_triggered': False}
             
-        Returns:
-            {
-                'is_pinching': bool,
-                'pinch_triggered': bool,  # 핀치가 처음 발동된 순간
-                'distance': float,
-                'position': (x, y)  # 핀치 위치 (클릭 시 고정)
-            }
-        """
+        state = self.states[label]['fingers'][finger_name]
         thumb_tip = landmarks[self.THUMB_TIP]
-        index_tip = landmarks[self.INDEX_TIP]
+        finger_tip = landmarks[tip_idx]
         
-        distance = self._calculate_distance(thumb_tip[:2], index_tip[:2])
-        is_pinching = distance < self.pinch_threshold
-        
-        # 핀치 위치는 엄지와 검지의 중간점
-        pinch_position = (thumb_tip[:2] + index_tip[:2]) / 2
+        distance = float(self._calculate_distance(thumb_tip[:2], finger_tip[:2]))
+        is_pinching = bool(distance < self.pinch_threshold)
         
         pinch_triggered = False
         current_time = time.time()
         
         if is_pinching:
-            if self.pinch_start_time is None:
-                self.pinch_start_time = current_time
-            elif current_time - self.pinch_start_time >= self.pinch_hold_time:
-                if not self.was_pinching:
+            if state['pinch_start_time'] is None:
+                state['pinch_start_time'] = current_time
+            elif current_time - state['pinch_start_time'] >= self.pinch_hold_time:
+                if not state['was_pinching']:
                     pinch_triggered = True
-                    self.was_pinching = True
+                    state['was_pinching'] = True
         else:
-            self.pinch_start_time = None
-            self.was_pinching = False
-        
+            state['pinch_start_time'] = None
+            state['was_pinching'] = False
+            
         return {
             'is_pinching': is_pinching,
             'pinch_triggered': pinch_triggered,
-            'distance': distance,
-            'position': tuple(pinch_position)
+            'distance': distance
         }
-    
-    def detect_fist(self, landmarks: np.ndarray) -> dict:
-        """
-        주먹 제스처 감지 (All Clear)
+
+    def detect_fist(self, landmarks: np.ndarray, label: str) -> dict:
+        """주먹 제스처 감지 (All Clear)"""
+        state = self.states[label]
         
-        Returns:
-            {
-                'is_fist': bool,
-                'fist_triggered': bool  # 주먹이 처음 발동된 순간
-            }
-        """
-        # 모든 손가락이 접혀있는지 확인
         fingers_folded = [
             self._is_finger_folded(landmarks, self.INDEX_TIP, self.INDEX_MCP),
             self._is_finger_folded(landmarks, self.MIDDLE_TIP, self.MIDDLE_MCP),
@@ -134,100 +132,99 @@ class GestureRecognizer:
             self._is_finger_folded(landmarks, self.PINKY_TIP, self.PINKY_MCP),
         ]
         
-        is_fist = all(fingers_folded)
+        is_fist = bool(all(fingers_folded))
         fist_triggered = False
         current_time = time.time()
         
         if is_fist:
-            if self.fist_start_time is None:
-                self.fist_start_time = current_time
-            elif current_time - self.fist_start_time >= self.fist_hold_time:
-                if not self.was_fist:
+            if state['fist_start_time'] is None:
+                state['fist_start_time'] = current_time
+            elif current_time - state['fist_start_time'] >= self.fist_hold_time:
+                if not state['was_fist']:
                     fist_triggered = True
-                    self.was_fist = True
+                    state['was_fist'] = True
         else:
-            self.fist_start_time = None
-            self.was_fist = False
+            state['fist_start_time'] = None
+            state['was_fist'] = False
         
         return {
             'is_fist': is_fist,
             'fist_triggered': fist_triggered
         }
     
-    def detect_dwell(self, landmarks: np.ndarray) -> dict:
-        """
-        체류 시간 기반 입력 감지
-        
-        Returns:
-            {
-                'dwell_progress': float,  # 0.0 ~ 1.0
-                'dwell_triggered': bool
-            }
-        """
-        index_tip = landmarks[self.INDEX_TIP][:2]
+    def detect_dwell(self, tip_pos: np.ndarray, label: str, finger_name: str) -> dict:
+        """체류 시간 기반 입력 감지 (손가락별)"""
+        state = self.states[label]['fingers'][finger_name]
         current_time = time.time()
         
-        if self.dwell_position is None:
-            self.dwell_position = tuple(index_tip)
-            self.dwell_start_time = current_time
+        if state['dwell_position'] is None:
+            state['dwell_position'] = (float(tip_pos[0]), float(tip_pos[1]))
+            state['dwell_start_time'] = current_time
             return {'dwell_progress': 0.0, 'dwell_triggered': False}
         
-        # 이동 거리 확인
         distance = self._calculate_distance(
-            np.array(self.dwell_position),
-            index_tip
+            np.array(state['dwell_position']),
+            tip_pos[:2]
         )
         
         if distance > self.dwell_radius:
-            # 위치가 변경됨 - 리셋
-            self.dwell_position = tuple(index_tip)
-            self.dwell_start_time = current_time
+            state['dwell_position'] = (float(tip_pos[0]), float(tip_pos[1]))
+            state['dwell_start_time'] = current_time
             return {'dwell_progress': 0.0, 'dwell_triggered': False}
         
-        # 체류 시간 계산
-        elapsed = current_time - self.dwell_start_time
-        progress = min(elapsed / self.dwell_time, 1.0)
+        elapsed = current_time - state['dwell_start_time']
+        progress = float(min(elapsed / self.dwell_time, 1.0))
         
         dwell_triggered = False
         if progress >= 1.0:
             dwell_triggered = True
-            self.dwell_start_time = current_time  # 리셋하여 연속 트리거 방지
+            state['dwell_start_time'] = current_time
         
         return {
             'dwell_progress': progress,
             'dwell_triggered': dwell_triggered
         }
-    
-    def get_pointer_position(self, landmarks: np.ndarray) -> tuple:
-        """
-        검지 끝 위치 반환 (포인터 위치)
-        """
-        return tuple(landmarks[self.INDEX_TIP][:2])
-    
-    def recognize(self, landmarks: np.ndarray) -> dict:
-        """
-        모든 제스처 인식 통합
+
+    def recognize(self, hands_data: List[dict]) -> List[dict]:
+        """모든 손과 손가락의 인식 통합"""
+        results = []
+        detected_labels = [hand['label'] for hand in hands_data]
         
-        Returns:
-            {
-                'pointer': (x, y),
-                'pinch': {...},
-                'fist': {...},
-                'dwell': {...}
-            }
-        """
-        return {
-            'pointer': self.get_pointer_position(landmarks),
-            'pinch': self.detect_pinch(landmarks),
-            'fist': self.detect_fist(landmarks),
-            'dwell': self.detect_dwell(landmarks)
+        # 감지되지 않은 손 리셋
+        for label in self.states:
+            if label not in detected_labels:
+                self.states[label] = self._init_hand_state()
+
+        finger_map = {
+            'thumb': self.THUMB_TIP,
+            'index': self.INDEX_TIP,
+            'middle': self.MIDDLE_TIP,
+            'ring': self.RING_TIP,
+            'pinky': self.PINKY_TIP
         }
+
+        for hand in hands_data:
+            landmarks = hand['landmarks']
+            label = hand['label']
+            
+            finger_results = {}
+            for f_name, tip_idx in finger_map.items():
+                tip_pos = landmarks[tip_idx]
+                finger_results[f_name] = {
+                    'pointer': (float(tip_pos[0]), float(tip_pos[1])),
+                    'dwell': self.detect_dwell(tip_pos, label, f_name),
+                    'pinch': self.detect_pinch(landmarks, label, f_name, tip_idx)
+                }
+            
+            results.append({
+                'label': label,
+                'fingers': finger_results,
+                'fist': self.detect_fist(landmarks, label)
+            })
+            
+        return results
     
     def reset(self):
         """모든 상태 초기화"""
-        self.pinch_start_time = None
-        self.fist_start_time = None
-        self.dwell_start_time = None
-        self.dwell_position = None
-        self.was_pinching = False
-        self.was_fist = False
+        for label in self.states:
+            self.states[label] = self._init_hand_state()

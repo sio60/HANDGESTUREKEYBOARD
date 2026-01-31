@@ -116,10 +116,22 @@ async def websocket_hand_tracking(websocket: WebSocket):
                 
                 if data.get("type") == "config":
                     send_video = data.get("send_video", True)
+                elif data.get("type") == "reset_calibration":
+                    if tracker:
+                        tracker.reset_calibration()
+                        print("📍 캘리브레이션 초기화")
                 elif data.get("type") == "calibrate":
                     if tracker and "target" in data:
-                        # 캘리브레이션 요청 처리
-                        pass
+                        target = data["target"]
+                        finger_idx = data.get("finger", 8)
+                        # 현재 랜드마크가 있을 때만 캘리브레이션 수행
+                        success, frame = webcam.read()
+                        if success:
+                            hands_data, _ = tracker.process_frame(frame)
+                            if hands_data:
+                                # 첫 번째 감지된 손을 기준으로 캘리브레이션
+                                tracker.calibrate(hands_data[0]['landmarks'], target, finger_idx)
+                                print(f"📍 캘리브레이션 완료: Target {target}")
                         
             except asyncio.TimeoutError:
                 pass
@@ -144,32 +156,25 @@ async def websocket_hand_tracking(websocket: WebSocket):
             frame = cv2.flip(frame, 1)
             
             # 손 추적
-            landmarks, annotated_frame = tracker.process_frame(frame)
+            # 1. 손 추적 (이제 리스트를 반환함)
+            hands_data, annotated_frame = tracker.process_frame(frame)
             
+            # 2. 제스처 인식
+            gesture_results = gesture_recognizer.recognize(hands_data)
+            
+            # 결과 전송 객체 구성
             response = {
                 "type": "tracking",
-                "hand_detected": landmarks is not None
+                "hands": gesture_results, 
+                "hand_detected": len(hands_data) > 0
             }
-            
-            if landmarks is not None:
-                # 제스처 인식
-                gestures = gesture_recognizer.recognize(landmarks)
-                response["pointer"] = list(gestures["pointer"])
-                response["gestures"] = {
-                    "pinch": gestures["pinch"],
-                    "fist": gestures["fist"],
-                    "dwell": gestures["dwell"]
-                }
-            else:
-                response["pointer"] = None
-                response["gestures"] = None
             
             # 비디오 프레임 전송 (선택적)
             if send_video:
                 _, buffer = cv2.imencode('.jpg', annotated_frame, [
                     cv2.IMWRITE_JPEG_QUALITY, 50
                 ])
-                response["frame"] = base64.b64encode(buffer).decode('utf-8')
+                response["video_frame"] = base64.b64encode(buffer).decode('utf-8')
             
             await websocket.send_json(response)
             
